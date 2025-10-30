@@ -1,0 +1,14 @@
+Typ;Datum;Betrag;Notiz;Forderung_ID
+HAUPTFORDERUNG;15.12.2024;596,43;Hauptforderung (brutto);HF1
+KOSTEN;15.12.2024;134,40;Anwaltsvergütung für vorgerichtl. Tätigkeit;NK01
+KOSTEN;10.01.2025;130,80;Festgestzte Kosten;NK02
+KOSTEN;29.01.2025;31,68;Vollstreckungsauftrag;NK03
+ZAHLUNG;10.03.2025;-23,30;Teilzahlung Schuldner;
+ZAHLUNG;17.03.2025;-114,72;Teilzahlung Schuldner;
+ZAHLUNG;31.03.2025;-114,72;Teilzahlung Schuldner;
+ZAHLUNG;05.05.2025;-114,72;Teilzahlung Schuldner;
+ZAHLUNG;05.06.2025;-114,72;Teilzahlung Schuldner;
+ZAHLUNG;04.07.2025;-114,72;Teilzahlung Schuldner;
+ZAHLUNG;04.08.2025;-115,00;Teilzahlung Schuldner;
+ZAHLUNG;01.09.2025;-115,20;Teilzahlung Schuldner;
+ZINSSTOP;24.10.2025;0,00;berechnen bis zu diesem Datum;

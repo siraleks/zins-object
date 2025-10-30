@@ -1,0 +1,357 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <title>§ 366 / § 367 BGB – Rechner (Claim-Objekte & korrekte Zinsperioden)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    body{font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif;margin:12px}
+    h1{margin:0 0 8px}
+    fieldset{margin:10px 0;padding:10px}
+    table{border-collapse:collapse;width:100%;margin:10px 0}
+    th,td{border:1px solid #ccc;padding:6px 8px;text-align:left}
+    .mono{font-family:ui-monospace,Consolas,Menlo,monospace}
+    .small{font-size:.9em;color:#444}
+    .btn{padding:.45rem .7rem;border:1px solid #555;border-radius:8px;background:#f5f5f5;cursor:pointer}
+    .btn:disabled{opacity:.5;cursor:not-allowed}
+    .hide{display:none}
+      .group-row{background:#f7f7f7;font-weight:600;border-top:2px solid #999}
+  </style>
+</head>
+<body>
+  <h1>§ 366 / § 367 BGB – Offline-Rechner</h1>
+  <p class="small">Version v16 (wiederhergestellt). CSV laden → Berechnen.</p>
+
+  <fieldset>
+    <legend>1) CSVs importieren</legend>
+    <div class="row">
+      <div>
+        <label>Forderungen/Zahlungen (Spalten: <span class="mono">Typ, Datum, Betrag, Notiz, Forderung_ID</span>)</label>
+        <input type="file" id="csvData" accept=".csv" />
+      </div>
+      <div>
+        <label>Bundesbank-Basiszins (Spalten: <span class="mono">gueltig_ab, basiszins_prozent</span>)</label>
+        <input type="file" id="csvZins" accept=".csv" />
+      </div>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>2) Zinseinstellungen</legend>
+    <div class="row">
+      <label><input type="radio" name="zinsregime" value="+5" checked> § 288 Abs. 1 BGB (Basiszins + 5 PP)</label>
+      <label><input type="radio" name="zinsregime" value="+9"> § 288 Abs. 2 BGB (Basiszins + 9 PP)</label>
+    </div>
+    <div class="row">
+      <label><input type="checkbox" id="zinsKosten" checked> Kosten (NK) verzinsen (ab Fälligkeit)</label>
+      <span class="small">Zinsmethode: <strong>30E/360 (deutsch)</strong></span>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>3) Übersicht</legend>
+    <input type="text" id="overviewText" maxlength="60" placeholder="z. B. Müller / Willi" style="width:100%">
+  </fieldset>
+
+  <div class="row" style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+    <button class="btn" id="btnCalc" disabled>Berechnen</button>
+    <button class="btn" id="btnPdf" disabled>Als PDF exportieren</button>
+    <span id="status" class="small"></span>
+  </div>
+
+  <div id="out" class="hide">
+    <h2>Ergebnisse</h2>
+    <div id="summary"></div>
+
+    <h3>Anrechnungs- und Zinsverlauf</h3>
+    <div id="alloc"></div>
+
+    <h3>Saldo-Historie je Forderung</h3>
+    <div id="history"></div>
+
+    <h3>Abschluss – offene Beträge</h3>
+    <div id="balances"></div>
+  </div>
+
+<script>
+// ----- Hilfsfunktionen (ohne Regex-Sonderzeichen in Literalen) -----
+function fmtDateDE(d){
+  const dt = new Date(d); const dd = (''+dt.getDate()).padStart(2,'0'); const mm = (''+(dt.getMonth()+1)).padStart(2,'0');
+  return dd + '.' + mm + '.' + dt.getFullYear();
+}
+function fmtDateTimeDE(d){
+  const dt = new Date(d); const dd = (''+dt.getDate()).padStart(2,'0'); const mm = (''+(dt.getMonth()+1)).padStart(2,'0');
+  const HH=(''+dt.getHours()).padStart(2,'0'); const MM=(''+dt.getMinutes()).padStart(2,'0');
+  return dd + '.' + mm + '.' + dt.getFullYear() + ' ' + HH + ':' + MM;
+}
+function fmtEUR(n){ return new Intl.NumberFormat('de-DE',{style:'currency',currency:'EUR'}).format(n); }
+function parseNumberDE(s){
+  if (s==null) return NaN; s = (''+s).trim(); if(!s) return NaN;
+  s = s.split('.').join(''); s = s.replace(',', '.');
+  const v = Number(s); return isFinite(v)? v : NaN;
+}
+function parseDateDE(s){
+  if(!s) return null; s=(''+s).trim(); const parts = s.split('.');
+  if(parts.length!==3) return null; const dd=Number(parts[0]); const mm=Number(parts[1]); const yyyy=Number(parts[2]);
+  if(!dd||!mm||!yyyy) return null; const d=new Date(yyyy, mm-1, dd); if(isNaN(d.getTime())) return null; d.setHours(0,0,0,0); return d;
+}
+function days_30E_360(d1,d2){
+  let D1=d1.getDate(), M1=d1.getMonth()+1, Y1=d1.getFullYear();
+  let D2=d2.getDate(), M2=d2.getMonth()+1, Y2=d2.getFullYear();
+  if(D1===31) D1=30; if(D2===31) D2=30;
+  return 360*(Y2-Y1) + 30*(M2-M1) + (D2-D1);
+}
+function cleanKey(s){
+  s=(''+(s||'')).toLowerCase();
+  const map={'ä':'a','ö':'o','ü':'u','ß':'ss'}; let t='';
+  for(const ch of s){ const repl = map[ch]; const c = repl? repl : ch; const ok=(c>='a'&&c<='z')||(c>='0'&&c<='9'); if(ok) t+=c; }
+  return t;
+}
+function onlyDigits(s){ let t=''; for(const ch of (s||'')){ if(ch>='0'&&ch<='9') t+=ch; } return t; }
+
+function csvToRows(text){
+  // Robust: akzeptiert Windows (\r\n), Unix (\n) und Classic Mac (\r)
+  const lines = String(text)
+    .split(/\r\n|\r|\n/)
+    .filter(l => l.trim().length > 0);
+  if (!lines.length) return [];
+  const headerLine = lines[0];
+  const useSemicolon = headerLine.split(';').length >= headerLine.split(',').length;
+  const delim = useSemicolon ? ';' : ',';
+  const rows = [];
+  for (const line of lines) {
+    const r = []; let cur = ''; let inQ = false; let i = 0;
+    while (i < line.length) {
+      const ch = line[i];
+      if (ch === '"') {
+        if (inQ && line[i+1] === '"') { cur += '"'; i += 2; continue; }
+        inQ = !inQ; i++; continue;
+      }
+      if (!inQ && ch === delim) { r.push(cur); cur = ''; i++; continue; }
+      cur += ch; i++;
+    }
+    r.push(cur);
+    rows.push(r);
+  }
+  return rows;
+}
+function rowsToObjects(rows){
+  if(!rows.length) return [];
+  const head = rows[0].map(h=>h.trim());
+  return rows.slice(1).map(r=>{ const o={}; head.forEach((h,idx)=> o[h] = (r[idx]!==undefined? r[idx].trim(): '')); return o; });
+}
+
+// ----- Datenaufbereitung -----
+function normalizeData(objs){
+  const events=[]; let stopDate=null;
+  for(const o of objs){
+    const typ=(o.Typ||'').trim().toUpperCase(); const date=parseDateDE(o.Datum); const amount=parseNumberDE(o.Betrag); const note=o.Notiz||''; const id=(o.Forderung_ID||'').trim();
+    if(!date||!typ) continue;
+    if(typ==='ZINSSTOP'){ stopDate=date; continue; }
+    if(typ==='HAUPTFORDERUNG' || typ==='KOSTEN'){
+      if(!isFinite(amount)||amount<=0) { console.warn('Ungültiger Betrag bei', o); continue; }
+      events.push({kind:'CLAIM', typ, id: id || (typ==='HAUPTFORDERUNG'?'HF1':''), date, amount, note});
+    } else if(typ==='ZAHLUNG'){
+      if(!isFinite(amount)||amount>=0){ console.warn('Zahlung muss negativ sein', o); continue; }
+      events.push({kind:'PAY', date, amount, note});
+    }
+  }
+  events.sort((a,b)=> (a.date-b.date));
+  return {events, stopDate};
+}
+function normalizeBaseRates(objs){
+  const rows=[]; if(!Array.isArray(objs)||!objs.length) return rows;
+  // Schlüsselspalten heuristisch ermitteln
+  const sample=objs[0]||{}; const keys=Object.keys(sample);
+  let keyDate=null, keyRate=null;
+  for(const k of keys){ const nk=cleanKey(k); if(!keyDate && (nk.indexOf('gueltig')!==-1 || nk.indexOf('beginn')!==-1 || nk.indexOf('stichtag')!==-1 || nk==='ab' || nk.indexOf('datum')!==-1 || nk.indexOf('start')!==-1)) keyDate=k;
+                         if(!keyRate && (nk.indexOf('basis')!==-1 && (nk.indexOf('zins')!==-1 || nk.indexOf('satz')!==-1 || nk.indexOf('prozent')!==-1))) keyRate=k; }
+  for(const o of objs){
+    const dRaw = keyDate ? o[keyDate] : (o.gueltig_ab ?? o.gueltigab ?? o.stichtag ?? o.Datum ?? o.ab);
+    const rRaw = keyRate ? o[keyRate] : (o.basiszins_prozent ?? o.basiszinssatz ?? o.basiszins ?? o.basis ?? o.satz ?? o.zinssatz);
+    const d=parseDateDE(dRaw); const br=parseNumberDE(rRaw); if(!d||!isFinite(br)) continue; rows.push({from:d, basePct: br});
+  }
+  rows.sort((a,b)=> a.from-b.from); return rows;
+}
+
+// ----- Modell -----
+class Claim{ constructor({id,typ,startDate,principal}){ this.id=id; this.typ=typ; this.startDate=startDate; this.openPrincipal=principal; this.interestAccrued=0; this.lastAccrualDate=startDate; this.history=[]; }
+  accrueSegment(segStart,segEnd,annualPct){ const from = segStart<this.startDate? this.startDate: segStart; if(segEnd<=from) return 0; const days=days_30E_360(from,segEnd); let interestAdd=0; if(this.openPrincipal>0 && annualPct>0){ interestAdd = this.openPrincipal * annualPct * (days/360); this.interestAccrued += interestAdd; }
+    this.history.push({ start:new Date(from), end:new Date(segEnd), days, ratePct: annualPct*100 || 0, id:this.id, typ:this.typ, interestAdd, openPrincipal:this.openPrincipal, interestAccrued:this.interestAccrued, sum:this.openPrincipal+this.interestAccrued }); this.lastAccrualDate=segEnd; return interestAdd; }
+  applyPayment(amount){ let usedZins=0, usedHS=0; if(amount<=0) return {usedForInterest:0, usedForPrincipal:0, remaining:amount}; const iz=Math.min(amount,this.interestAccrued); if(iz>0){ this.interestAccrued-=iz; amount-=iz; usedZins=iz; } const pr=Math.min(amount,this.openPrincipal); if(pr>0){ this.openPrincipal-=pr; amount-=pr; usedHS=pr; } return {usedForInterest:usedZins, usedForPrincipal:usedHS, remaining:amount}; }
+  snapshot(atDate){ this.history.push({ start:new Date(atDate), end:new Date(atDate), days:0, ratePct:null, id:this.id, typ:this.typ, interestAdd:0, openPrincipal:this.openPrincipal, interestAccrued:this.interestAccrued, sum:this.openPrincipal+this.interestAccrued, isSnapshot:true }); }
+}
+
+// ----- Zins und Timeline -----
+function rateAt(rates,date){ if(!Array.isArray(rates)||!rates.length) throw new Error('Keine Basiszinssätze geladen.'); let cur=rates[0]; for(const r of rates){ if(r.from<=date) cur=r; else break; } return cur; }
+function annualPctAt(rates,date,addPP){ const r=rateAt(rates,date); return (r.basePct + addPP)/100; }
+
+function compute(input,rates,opts){ const addPP=opts.addPP; const interestCosts=opts.interestCosts; const claimMap=new Map();
+  for(const ev of input.events){ if(ev.kind==='CLAIM'){ const id=ev.id || (ev.typ==='HAUPTFORDERUNG'?'HF1':''); if(!id) continue; claimMap.set(id,new Claim({id,typ:ev.typ,startDate:ev.date,principal:ev.amount})); } }
+  if(!claimMap.size) throw new Error('Keine Forderungen gefunden.');
+  const payments=input.events.filter(e=>e.kind==='PAY').sort((a,b)=> a.date-b.date);
+  const points=new Set(); claimMap.forEach(c=>points.add(c.startDate.getTime())); rates.forEach(r=>points.add(r.from.getTime())); payments.forEach(p=>points.add(p.date.getTime()));
+  if(input.stopDate){ const sd=new Date(input.stopDate); sd.setHours(0,0,0,0); points.add(sd.getTime()); } else { const today=new Date(); today.setHours(0,0,0,0); points.add(today.getTime()); }
+  const timeline=Array.from(points).sort((a,b)=>a-b).map(t=>new Date(t));
+  const allocLog=[];
+  for(let i=0;i<timeline.length-1;i++){ const segStart=timeline[i]; const segEnd=timeline[i+1]; const paysToday=payments.filter(p=>p.date.getTime()===segEnd.getTime());
+    claimMap.forEach(c=>{ const eligible=(c.typ==='HAUPTFORDERUNG') || (interestCosts && c.typ==='KOSTEN'); const annualPct=eligible? annualPctAt(rates,segStart,addPP): 0; if(segEnd>c.startDate){ c.accrueSegment(segStart,segEnd,annualPct); } });
+    if(paysToday.length){ for(const pay of paysToday){ let amount=-pay.amount; const entry={date:pay.date, raw:-amount, splits:[]};
+        const order=Array.from(claimMap.values()).sort((a,b)=>{ const ra=(a.typ==='KOSTEN')?0:1; const rb=(b.typ==='KOSTEN')?0:1; if(ra!==rb) return ra-rb; if(a.typ==='KOSTEN'&&b.typ==='KOSTEN'){ const na=Number(onlyDigits(a.id)||'999999'); const nb=Number(onlyDigits(b.id)||'999999'); return na-nb; } return 0; });
+        for(const c of order){ if(amount<=1e-9) break; const res=c.applyPayment(amount); amount=res.remaining; if(res.usedForInterest>0) entry.splits.push({id:c.id, part:'Zins', value:res.usedForInterest}); if(res.usedForPrincipal>0) entry.splits.push({id:c.id, part:(c.typ==='KOSTEN'?'Kosten':'HAUPTFORDERUNG'), value:res.usedForPrincipal}); }
+        if(amount>1e-9){ entry.splits.push({id:'(alle getilgt)', part:'Überschuss', value:amount}); amount=0; }
+        allocLog.push(entry); claimMap.forEach(c=>c.snapshot(segEnd)); }
+    }
+  }
+  const claims=Array.from(claimMap.values()); return {claims, allocLog, rates, addPP};
+}
+
+// ----- Rendering -----
+function renderResults(res){
+  const pdfBtn=document.getElementById('btnPdf'); if(pdfBtn) pdfBtn.disabled=true; document.getElementById('out').classList.remove('hide');
+  const totalOpen=res.claims.reduce((s,c)=> s+c.openPrincipal+c.interestAccrued, 0);
+  const hf=res.claims.find(c=>c.typ==='HAUPTFORDERUNG'); const nkOpen=res.claims.filter(c=>c.typ==='KOSTEN').reduce((s,c)=> s+c.openPrincipal+c.interestAccrued,0);
+  const ov=document.getElementById('overviewText')?.value?.trim(); const zpp=Number((document.querySelector('input[name="zinsregime"]:checked')||{}).value?.replace('+','') || 5);
+  document.getElementById('summary').innerHTML =
+    (ov? '<p><strong>Übersicht:</strong> '+ov+'</p>':'')+
+    '<p><strong>Zinsregime:</strong> Basiszinssatz + '+zpp+' Prozentpunkte</p>'+
+    '<p><strong>Gesamt offen (inkl. Zinsen):</strong> '+fmtEUR(totalOpen)+'</p>'+
+    '<ul>'+
+      '<li>HAUPTFORDERUNG (HF): '+fmtEUR((hf?hf.openPrincipal:0)+(hf?hf.interestAccrued:0))+'</li>'+
+      '<li>Nebenkosten (Summe NK): '+fmtEUR(nkOpen)+'</li>'+
+    '</ul>';
+  const alloc=document.getElementById('alloc');
+  let html='<table><thead><tr><th>Datum</th><th>Zuordnung</th><th>Betrag</th></tr></thead><tbody>';
+  for(const a of res.allocLog){ const d=fmtDateDE(a.date); const total=a.splits.reduce((s,x)=>s+x.value,0); const lines=a.splits.map(x=> (x.id+' – '+x.part+': <span class="mono">'+fmtEUR(x.value)+'</span>')).join('<br>'); html+='<tr><td>'+d+'</td><td>'+lines+'</td><td class="mono">'+fmtEUR(total)+'</td></tr>'; }
+  html+='</tbody></table>'; alloc.innerHTML=html;
+  const historyHost=document.getElementById('history');
+  const rows = res.claims.flatMap(c=> c.history.map(h=>{ const obj={}; for(const k in h) obj[k]=h[k]; obj.id=c.id; obj.typ=c.typ; return obj; }));
+  const ordered = rows.sort((a,b)=> (a.start-b.start) || (''+(a.id||'')).localeCompare(''+(b.id||'')) );
+  let hh = '<table><thead><tr>'+
+           '<th>Zeitraum von</th><th>bis</th><th>Tage (30E/360)</th>'+
+           '<th>Forderung</th><th>Typ</th><th>Zinssatz (%)</th>'+
+           '<th>Zinsen in Periode</th><th>Offene HS</th><th>Aufgelaufene Zinsen</th><th>Summe</th>'+
+           '</tr></thead><tbody>';
+  const ratesRender = res.rates || [];
+  const addPPRender = (res.addPP!=null)? res.addPP : zpp;
+  let curKey = '';
+  for(const s of ordered){
+    const hp = getHalfYearPeriod(new Date(s.start));
+    let base = 0;
+    try { const baseObj = ratesRender.length? rateAt(ratesRender, hp.start) : null; base = baseObj? baseObj.basePct : 0; } catch(_e) {}
+    const key = fmtDateDE(hp.start)+'_'+fmtDateDE(hp.end)+'_'+base+'_'+addPPRender;
+    if(key!==curKey){
+      curKey = key;
+      const label = 'Zinsperiode '+fmtDateDE(hp.start)+' – '+fmtDateDE(hp.end)+' (Basiszins '+base.toFixed(2).replace('.',',')+'% + '+addPPRender+' PP = '+(base+addPPRender).toFixed(2).replace('.',',')+'%)';
+      hh += '<tr class="group-row"><td colspan="10">'+label+'</td></tr>';
+    }
+    hh += '<tr>'+
+      '<td>'+fmtDateDE(s.start)+'</td>'+
+      '<td>'+fmtDateDE(displayPeriodEndForRow(s))+'</td>'+
+      '<td class="mono">'+s.days+'</td>'+
+      '<td>'+(s.id||'')+'</td>'+
+      '<td>'+s.typ+'</td>'+
+      '<td class="mono">'+(s.ratePct==null? '–' : (Number(s.ratePct).toFixed(2).replace('.',',')))+'</td>'+
+      '<td class="mono">'+fmtEUR(s.interestAdd||0)+'</td>'+
+      '<td class="mono">'+fmtEUR(s.openPrincipal||0)+'</td>'+
+      '<td class="mono">'+fmtEUR(s.interestAccrued||0)+'</td>'+
+      '<td class="mono">'+fmtEUR(s.sum||0)+'</td>'+
+    '</tr>';
+  }
+  hh += '</tbody></table>';
+  historyHost.innerHTML = hh;
+  const bal=document.getElementById('balances');
+  let hb='<table><thead><tr><th>Forderung</th><th>Typ</th><th>Offene Hauptsache</th><th>Aufgelaufene Zinsen</th><th>Summe offen</th></tr></thead><tbody>';
+  const byType=res.claims.slice().sort((a,b)=> a.typ.localeCompare(b.typ) || (''+(a.id||'')).localeCompare(''+(b.id||'')) );
+  for(const c of byType){ hb+='<tr><td>'+(c.id||'')+'</td><td>'+c.typ+'</td><td class="mono">'+fmtEUR(c.openPrincipal)+'</td><td class="mono">'+fmtEUR(c.interestAccrued)+'</td><td class="mono">'+fmtEUR(c.openPrincipal+c.interestAccrued)+'</td></tr>'; }
+  hb+='</tbody></table>'; bal.innerHTML=hb;
+}
+
+// Halbjahresperiode (für spätere Darstellungen)
+function getHalfYearPeriod(d){
+  const y = d.getFullYear();
+  // 1. Halbjahr: 01.01. – 30.06.
+  // 2. Halbjahr: 01.07. – 31.12.
+  if (d.getMonth() >= 6) {
+    const s = new Date(y, 6, 1);
+    const e = new Date(y, 11, 31);
+    s.setHours(0, 0, 0, 0);
+    e.setHours(0, 0, 0, 0);
+    return { start: s, end: e };
+  } else {
+    const s = new Date(y, 0, 1);
+    const e = new Date(y, 5, 30);
+    s.setHours(0, 0, 0, 0);
+    e.setHours(0, 0, 0, 0);
+    return { start: s, end: e };
+  }
+}
+
+// Anzeigehilfe: Wenn ein Segment exakt am Beginn einer Halbjahresperiode endet
+// (01.01. oder 01.07.), zeigen wir als "bis" den Banktag davor (30.12. bzw. 30.06.).
+function displayPeriodEndForRow(seg){
+  const end = new Date(seg.end);
+  const d = end.getDate();
+  const m = end.getMonth(); // 0=Jan, 6=Jul
+  if (d === 1 && (m === 0 || m === 6)) {
+    if (m === 0) { // 01.01.YYYY -> 30.12.(YYYY-1)
+      return new Date(end.getFullYear()-1, 11, 30);
+    } else {     // 01.07.YYYY -> 30.06.YYYY
+      return new Date(end.getFullYear(), 5, 30);
+    }
+  }
+  return end;
+}
+
+// Neue Funktion zur Prüfung der Zinsperioden auf der Zeitachse
+function markHalfYearPeriods(rows){
+  // Fügt Markierungen der Bundesbank-Zinsperioden zu den berechneten Segmenten hinzu
+  return rows.map(r => {
+    const period = getHalfYearPeriod(new Date(r.start));
+    r.periodStart = fmtDateDE(period.start);
+    r.periodEnd = fmtDateDE(period.end);
+    return r;
+  });
+}
+
+// ----- CSV Handling -----
+let dataObjs=null, rateObjs=null;
+function enableCalcIfReady(){ const ok=Array.isArray(dataObjs)&&dataObjs.length&&Array.isArray(rateObjs)&&rateObjs.length; document.getElementById('btnCalc').disabled=!ok; document.getElementById('status').textContent = ok? 'Bereit zur Berechnung.' : 'Bitte beide CSVs laden.'; }
+function handleCsv(file, kind){
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const rows = csvToRows(reader.result);
+      const objs = rowsToObjects(rows);
+      if (kind === 'data') { dataObjs = objs; } else { rateObjs = objs; }
+      const statusEl = document.getElementById('status');
+      const dCount = Array.isArray(dataObjs) ? dataObjs.length : 0;
+      const zCount = Array.isArray(rateObjs) ? rateObjs.length : 0;
+      statusEl.textContent = 'Geladen – Daten: '+dCount+' Zeilen, Zinsen: '+zCount+' Zeilen';
+      enableCalcIfReady();
+    } catch (e) {
+      console.error(e);
+      document.getElementById('status').textContent = 'CSV konnte nicht gelesen werden.';
+    }
+  };
+  reader.readAsText(file, 'utf-8');
+}
+
+document.addEventListener('DOMContentLoaded',()=>{
+  document.getElementById('csvData').addEventListener('change',(ev)=>{ if(ev.target.files&&ev.target.files[0]) handleCsv(ev.target.files[0],'data'); });
+  document.getElementById('csvZins').addEventListener('change',(ev)=>{ if(ev.target.files&&ev.target.files[0]) handleCsv(ev.target.files[0],'zins'); });
+  document.getElementById('btnCalc').addEventListener('click',()=>{
+    try{
+      const input=normalizeData(dataObjs);
+      const rates=normalizeBaseRates(rateObjs);
+      if(!rates.length){ alert('Die Basiszins-CSV konnte nicht ausgewertet werden.'); return; }
+      if(!input.stopDate){ const today=new Date(); today.setHours(0,0,0,0); input.stopDate=today; }
+      const zinsPP = Number((document.querySelector('input[name="zinsregime"]:checked')||{}).value?.replace('+','')||5);
+      const res=compute(input,rates,{ addPP:zinsPP, interestCosts: document.getElementById('zinsKosten').checked });
+      renderResults(res);
+    }catch(e){ console.error(e); alert('Fehler: '+e.message); }
+  });
+});
+</script>
+</body>
+</html>
